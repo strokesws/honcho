@@ -68,6 +68,7 @@ async def honcho_llm_call(
     tool_choice: str | dict[str, Any] | None = None,
     tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
     max_tool_iterations: int = 10,
+    commit_tool_names: list[str] | None = None,
     messages: list[dict[str, Any]] | None = None,
     max_input_tokens: int | None = None,
     trace_name: str | None = None,
@@ -97,6 +98,7 @@ async def honcho_llm_call(
     tool_choice: str | dict[str, Any] | None = None,
     tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
     max_tool_iterations: int = 10,
+    commit_tool_names: list[str] | None = None,
     messages: list[dict[str, Any]] | None = None,
     max_input_tokens: int | None = None,
     trace_name: str | None = None,
@@ -126,6 +128,7 @@ async def honcho_llm_call(
     tool_choice: str | dict[str, Any] | None = None,
     tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
     max_tool_iterations: int = 10,
+    commit_tool_names: list[str] | None = None,
     messages: list[dict[str, Any]] | None = None,
     max_input_tokens: int | None = None,
     trace_name: str | None = None,
@@ -154,6 +157,7 @@ async def honcho_llm_call(
     tool_choice: str | dict[str, Any] | None = None,
     tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
     max_tool_iterations: int = 10,
+    commit_tool_names: list[str] | None = None,
     messages: list[dict[str, Any]] | None = None,
     max_input_tokens: int | None = None,
     trace_name: str | None = None,
@@ -168,6 +172,10 @@ async def honcho_llm_call(
 
     Backup provider/model (if configured on the primary ModelConfig's
     `fallback`) is used on the final retry attempt, which is 3 by default.
+
+    When `commit_tool_names` is set, the tool loop's final permitted iteration is
+    run as a "commit turn" restricted to those tools instead of the tool-less
+    synthesis call that otherwise ends an exhausted run (see `execute_tool_loop`).
 
     Raises:
         ValidationException: If streaming and tool calling are combined
@@ -450,6 +458,7 @@ async def honcho_llm_call(
             tool_choice=tool_choice,
             tool_executor=tool_executor,
             max_tool_iterations=max_tool_iterations,
+            commit_tool_names=commit_tool_names,
             response_model=response_model,
             json_mode=json_mode,
             temperature=temperature,

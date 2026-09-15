@@ -359,6 +359,7 @@ async def execute_tool_loop(
     iteration_callback: IterationCallback | None = None,
     telemetry: LLMTelemetryContext | None = None,
     langfuse_run_handle: Any | None = None,
+    commit_tool_names: list[str] | None = None,
 ) -> HonchoLLMCallResponse[Any] | StreamingResponseWithMetadata:
     """Run the iterative tool calling loop for agentic LLM interactions.
 
@@ -367,6 +368,14 @@ async def execute_tool_loop(
       2. Execute any tool calls the LLM requests
       3. Append tool results to the conversation
       4. Repeat until the LLM stops calling tools or max iterations reached
+
+    `commit_tool_names`, when set, turns the FINAL permitted iteration into a
+    "commit turn": the model is told discovery is over and is offered ONLY those
+    tools, and whatever it calls is executed as usual. Without it the loop's
+    last word on an exhausted budget is a tool-less synthesis call, so any tool
+    a caller must see called (e.g. the dream specialists' write tools) is
+    unreachable exactly when the budget runs out. Callers that leave it `None`
+    are unaffected.
 
     Returns:
         Final HonchoLLMCallResponse with accumulated token counts and tool call
@@ -409,6 +418,23 @@ async def execute_tool_loop(
     # Track effective tool_choice — switches from "required"/"any" to "auto" after iter 1.
     effective_tool_choice = tool_choice
 
+    # The commit turn (see `commit_tool_names` in the docstring): only engage it
+    # when it is a strict subset of the offered tools — a filter that keeps
+    # everything would change the prompt for no gain.
+    commit_tools: list[dict[str, Any]] = []
+    if commit_tool_names:
+        commit_tools = [t for t in tools if t.get("name") in commit_tool_names]
+        if len(commit_tools) == len(tools):
+            commit_tools = []
+    commit_turn_available = bool(commit_tools)
+    commit_turn_prompt = (
+        "You have reached your final turn. The discovery tools are no longer "
+        "available. Call the memory-writing tool(s) you still need now — "
+        + ", ".join(f"`{t['name']}`" for t in commit_tools)
+        + " — to record what you have already found. Do not reply in prose."
+    )
+    commit_turn_used = False
+
     while iteration < max_tool_iterations:
         step = start_langfuse_agent_step(
             _step_label(telemetry),
@@ -428,12 +454,29 @@ async def execute_tool_loop(
                     conversation_messages, max_input_tokens
                 )
 
+            # The final permitted iteration is the commit turn: the model keeps
+            # ONLY the caller's commit tools (and is told the discovery tools are
+            # gone), so a budget exhausted mid-discovery still ends in a write
+            # instead of a prose summary of one.
+            is_commit_turn = (
+                commit_turn_available and iteration + 1 == max_tool_iterations
+            )
+            if is_commit_turn:
+                conversation_messages.append(
+                    {"role": "user", "content": commit_turn_prompt}
+                )
+            iteration_tools = commit_tools if is_commit_turn else tools
+            iteration_tool_choice: str | dict[str, Any] | None = (
+                "auto" if is_commit_turn else effective_tool_choice
+            )
+
             async def _call_with_messages(
                 tool_choice_for_call: str
                 | dict[str, Any]
-                | None = effective_tool_choice,
+                | None = iteration_tool_choice,
                 captured_messages: list[dict[str, Any]] = conversation_messages,
                 iteration_for_call: int = iteration + 1,
+                tools_for_call: list[dict[str, Any]] = iteration_tools,
             ) -> HonchoLLMCallResponse[Any]:
                 plan = get_attempt_plan()
                 return await honcho_llm_call_inner(
@@ -450,7 +493,7 @@ async def execute_tool_loop(
                     plan.thinking_budget_tokens,
                     stream=False,
                     client_override=plan.client,
-                    tools=tools,
+                    tools=tools_for_call,
                     tool_choice=tool_choice_for_call,
                     messages=captured_messages,
                     selected_config=plan.selected_config,
@@ -660,9 +703,29 @@ async def execute_tool_loop(
 
         iteration += 1
 
-    logger.warning(
-        f"Tool execution loop reached max iterations ({max_tool_iterations})"
-    )
+        if is_commit_turn:
+            # Nothing follows the commit turn: its tool calls are this run's
+            # write. Merge the cumulative accounting onto its own response and
+            # return, deliberately skipping the tool-less synthesis call below —
+            # that call would be a *second* last word on top of the commit.
+            commit_turn_used = True
+            response.tool_calls_made = all_tool_calls
+            response.input_tokens = total_input_tokens
+            response.output_tokens = total_output_tokens
+            response.cache_creation_input_tokens = total_cache_creation_tokens
+            response.cache_read_input_tokens = total_cache_read_tokens
+            response.iterations = iteration + 1
+            response.hit_input_token_cap = (
+                response.hit_input_token_cap or hit_input_token_cap
+            )
+            if not stream_final:
+                return response
+            break
+
+    if not commit_turn_used:
+        logger.warning(
+            f"Tool execution loop reached max iterations ({max_tool_iterations})"
+        )
 
     # The max-iteration synthesis call gets iteration N+1 in telemetry so 's
     # AgentIterationEvent and this LLMCallCompletedEvent line up sequentially.
@@ -673,7 +736,8 @@ async def execute_tool_loop(
         "Based on all the information you have gathered, provide your final response now. "
         "Do not attempt to call any more tools."
     )
-    conversation_messages.append({"role": "user", "content": synthesis_prompt})
+    if not commit_turn_used:
+        conversation_messages.append({"role": "user", "content": synthesis_prompt})
 
     # Truncate again — the per-iteration truncate ran before the last tool
     # call, so appending synthesis_prompt could nudge us back over the cap.

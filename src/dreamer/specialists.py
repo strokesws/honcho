@@ -170,6 +170,16 @@ class BaseSpecialist(ABC):
         """
         return settings.DREAM.MAX_TOOL_ITERATIONS
 
+    # Tools that must stay reachable on the specialist's FINAL permitted
+    # iteration — its write path. `execute_tool_loop` otherwise ends an
+    # exhausted run with one tool-less synthesis call, so the commit call is
+    # unreachable by construction exactly when the budget runs out mid-
+    # discovery: the model can only print what it would have committed. Listing
+    # the write tools here reserves the last turn for them instead.
+    # Measured on the pinned stack: 7 of 8 deduction runs hit the cap having
+    # called discovery tools only, and every one of them ended with zero writes.
+    commit_tool_names: tuple[str, ...] = ()
+
     @abstractmethod
     def build_system_prompt(
         self, observed: str, *, peer_card_enabled: bool = True
@@ -356,6 +366,9 @@ If you update it, send the full deduplicated list and remove stale entries.
                 tool_choice=None,
                 tool_executor=tool_executor,
                 max_tool_iterations=self.get_max_iterations(),
+                # Reserve the run's final turn for this specialist's write path
+                # so an exhausted budget cannot end the dream in prose.
+                commit_tool_names=list(self.commit_tool_names) or None,
                 messages=messages,
                 telemetry=LLMTelemetryContext(
                     workspace_name=workspace_name,
@@ -529,6 +542,14 @@ class DeductionSpecialist(BaseSpecialist):
 
     name: str = "deduction"
     peer_card_update_instruction: str = "Update this with `update_peer_card` only for stable identity markers. See the PEER CARD section in the system prompt for the allowed entry kinds and rules."
+    # Deduction's write path — reserved for the run's final turn (see
+    # BaseSpecialist.commit_tool_names). The single measured deduction run that
+    # committed did so with these three calls at the very end of its budget.
+    commit_tool_names: tuple[str, ...] = (
+        "create_observations_deductive",
+        "delete_observations",
+        "update_peer_card",
+    )
 
     def get_tools(self, *, peer_card_enabled: bool = True) -> list[dict[str, Any]]:
         if peer_card_enabled:
@@ -663,6 +684,9 @@ class InductionSpecialist(BaseSpecialist):
     name: str = "induction"
     # Induction never writes to the peer card; behavioral patterns are observations.
     can_update_peer_card: bool = False
+    # Induction's write path — reserved for the run's final turn (see
+    # BaseSpecialist.commit_tool_names).
+    commit_tool_names: tuple[str, ...] = ("create_observations_inductive",)
 
     def get_tools(self, *, peer_card_enabled: bool = True) -> list[dict[str, Any]]:
         _ = peer_card_enabled
@@ -797,6 +821,10 @@ class CardRefreshSpecialist(BaseSpecialist):
 
     # Low iteration ceiling for this lightweight, single-purpose run.
     MAX_ITERATIONS_CEILING: int = 6
+    # The card is this specialist's only write path — reserve the final turn
+    # for it so an exhausted budget cannot end the run in prose (see
+    # BaseSpecialist.commit_tool_names).
+    commit_tool_names: tuple[str, ...] = ("update_peer_card",)
 
     def __init__(self, *, rebuild: bool = False) -> None:
         self.rebuild: bool = rebuild
