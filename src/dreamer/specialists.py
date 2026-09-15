@@ -161,8 +161,14 @@ class BaseSpecialist(ABC):
         return 16384
 
     def get_max_iterations(self) -> int:
-        """Get max tool iterations."""
-        return 15
+        """Get max tool iterations for this specialist.
+
+        Honours the operator-configured dream iteration budget
+        (``DREAM_MAX_TOOL_ITERATIONS`` -> ``settings.DREAM.MAX_TOOL_ITERATIONS``,
+        default 20). Specialists with a deliberately tiny iteration budget
+        override this with their own ceiling (see ``CardRefreshSpecialist``).
+        """
+        return settings.DREAM.MAX_TOOL_ITERATIONS
 
     @abstractmethod
     def build_system_prompt(
@@ -542,9 +548,6 @@ class DeductionSpecialist(BaseSpecialist):
     def get_max_tokens(self) -> int:
         return 8192
 
-    def get_max_iterations(self) -> int:
-        return 12
-
     def build_system_prompt(
         self, observed: str, *, peer_card_enabled: bool = True
     ) -> str:
@@ -673,9 +676,6 @@ class InductionSpecialist(BaseSpecialist):
 
     def get_max_tokens(self) -> int:
         return 8192
-
-    def get_max_iterations(self) -> int:
-        return 10
 
     def build_system_prompt(
         self, observed: str, *, peer_card_enabled: bool = True
